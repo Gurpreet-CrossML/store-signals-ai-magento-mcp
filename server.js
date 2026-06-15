@@ -216,107 +216,97 @@ server.tool(
   },
 );
 
-// ######### 2. Fetch Products by ID #########
+// ######### 2. Fetch Products by IDs #########
 server.tool(
-  "get_product_by_id",
-  `Get detailed information about a product by its product ID.
-  Returns product details including name, price, stock status, image URL, and more.
-  Product ID are unique identifiers for products in Magento. These are not the same as product IDs or product names.
-  Product ID are alphanumeric strings assigned to each product for identification and inventory management.
-  
+  "get_product_by_ids",
+  `Get detailed information about multiple products by product IDs.
+
   Parameters:
-  @param {number} product_id: The product ID of the product to retrieve.
+  @param {string[]} product_ids: Array of Magento product IDs.
   @param {string} store_code: Website store name/code.
   `,
   {
-    product_id: z.number().describe("The product ID of the product"),
+    product_ids: z.array(z.string()).describe("Array of Magento product IDs"),
     store_code: z.string().describe("Store name/code"),
   },
-  async ({ product_id, store_code }) => {
+  async ({ product_ids, store_code }) => {
     try {
-      const cacheKey = `product:${product_id}`;
-      const cached = await getCache(cacheKey);
-      if (cached) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify(cached, null, 2),
+      const results = [];
+      for (const product_id of product_ids) {
+        const cacheKey = `product:${product_id}`;
+
+        // Check cache first
+        const cached = await getCache(cacheKey);
+        if (cached) {
+          results.push(cached);
+          continue;
+        }
+
+        try {
+          const response = await callMagentoApi(
+            "GET",
+            `/products?searchCriteria[filter_groups][0][filters][0][field]=entity_id&searchCriteria[filter_groups][0][filters][0][value]=${product_id}&searchCriteria[filter_groups][0][filters][0][condition_type]=eq`,
+            null,
+            store_code,
+            false,
+          );
+
+          const product = response?.items?.[0];
+
+          if (!product?.sku) {
+            continue;
+          }
+
+          const graphqlQuery = {
+            query: productSearchBySKU,
+            variables: {
+              sku: product.sku,
             },
-          ],
-        };
-      }
+          };
 
-      const response = await callMagentoApi(
-        "GET",
-        `/products?searchCriteria[filter_groups][0][filters][0][field]=entity_id&searchCriteria[filter_groups][0][filters][0][value]=${product_id}&searchCriteria[filter_groups][0][filters][0][condition_type]=eq`,
-        null,
-        store_code,
-        false,
-      );
+          const productResponse = await callMagentoApi(
+            "POST",
+            "",
+            graphqlQuery,
+            store_code,
+            true,
+          );
 
-      const product = response?.items?.[0];
+          const graphqlProduct = productResponse?.data?.products?.items?.[0];
 
-      // If product not found, return an error message
-      if (!product || !product?.sku) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Product with product id "${product_id}" not found.`,
-            },
-          ],
-          isError: true,
-        };
-      }
+          if (!graphqlProduct) {
+            continue;
+          }
 
-      const graphqlQuery = {
-        query: productSearchBySKU,
-        variables: {
-          sku: product?.sku,
-        },
-      };
+          const formattedProducts = await formatProducts(
+            [graphqlProduct],
+            true,
+          );
 
-      const productResponse = await callMagentoApi(
-        "POST",
-        "",
-        graphqlQuery,
-        store_code,
-        true,
-      );
+          const formattedProduct = formattedProducts?.[0];
 
-      if (
-        !productResponse?.data?.products?.items ||
-        productResponse?.data?.products?.items?.length === 0
-      ) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Product with product id "${product_id}" not found.`,
-            },
-          ],
-          isError: true,
-        };
-      }
+          if (formattedProduct) {
+            results.push(formattedProduct);
 
-      // Format the search results
-      const formattedResults = await formatProducts(
-        productResponse?.data?.products?.items,
-        true,
-      );
-
-      try {
-        await setCache(cacheKey, formattedResults[0]);
-      } catch (e) {
-        console.warn("search cache set failed:", e?.message || e);
+            try {
+              await setCache(cacheKey, formattedProduct);
+            } catch (e) {
+              console.warn("product cache set failed:", e?.message || e);
+            }
+          }
+        } catch (err) {
+          console.warn(
+            `Failed to fetch product ${product_id}:`,
+            err?.message || err,
+          );
+        }
       }
 
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify(formattedResults[0], null, 2),
+            text: JSON.stringify({ products: results }, null, 2),
           },
         ],
       };
