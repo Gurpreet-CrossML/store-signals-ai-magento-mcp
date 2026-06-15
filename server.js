@@ -226,9 +226,7 @@ server.tool(
   @param {string} store_code: Website store name/code.
   `,
   {
-    product_ids: z
-      .array(z.string())
-      .describe("Array of Magento product IDs"),
+    product_ids: z.array(z.string()).describe("Array of Magento product IDs"),
     store_code: z.string().describe("Store name/code"),
   },
   async ({ product_ids, store_code }) => {
@@ -274,8 +272,7 @@ server.tool(
             true,
           );
 
-          const graphqlProduct =
-            productResponse?.data?.products?.items?.[0];
+          const graphqlProduct = productResponse?.data?.products?.items?.[0];
 
           if (!graphqlProduct) {
             continue;
@@ -294,10 +291,7 @@ server.tool(
             try {
               await setCache(cacheKey, formattedProduct);
             } catch (e) {
-              console.warn(
-                "product cache set failed:",
-                e?.message || e,
-              );
+              console.warn("product cache set failed:", e?.message || e);
             }
           }
         } catch (err) {
@@ -312,7 +306,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: JSON.stringify({"products": results}, null, 2),
+            text: JSON.stringify({ products: results }, null, 2),
           },
         ],
       };
