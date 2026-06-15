@@ -50,7 +50,7 @@ for (const [key, value] of Object.entries(allEnvironmentVariables)) {
     console.error(`ERROR: ${key} environment variable is required`);
     process.exit(1);
   }
-};
+}
 
 // Define sort options and their mapping to sort keys and reverse flags
 const SortOption = Object.freeze({
@@ -106,11 +106,11 @@ const callMagentoApi = async (
 
     const headers = {
       "Content-Type": "application/json",
-      "Authorization": `Bearer ${MAGENTO_API_TOKEN}`,
+      Authorization: `Bearer ${MAGENTO_API_TOKEN}`,
     };
 
     if (store_code) {
-      headers["Store"] = store_code
+      headers["Store"] = store_code;
     }
 
     const config = {
@@ -198,21 +198,24 @@ const logProductViewEvents = async (products, session_id, store_code) => {
 
 // Utility function to extract text from the html
 const htmlToText = (html) => {
-  return html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+  return html
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 };
 
 // Utility function to format products data received from Magento API
-const formatProducts = (
-  products,
-  full_details = false,
-) => {
+const formatProducts = (products, full_details = false) => {
   try {
     if (!products || products?.length === 0) return [];
 
     return products.map((product) => {
       const productId = product.id;
       const productName = product.name;
-      const productCategory = product?.categories && product?.categories?.length > 0 ? product?.categories[0].name : "";
+      const productCategory =
+        product?.categories && product?.categories?.length > 0
+          ? product?.categories[0].name
+          : "";
 
       const baseProduct = {
         id: productId,
@@ -229,10 +232,10 @@ const formatProducts = (
 
       // Store avaialable options for a product, if that product has variants
       const optionMap = {};
-      product.configurable_options?.forEach(option => {
+      product.configurable_options?.forEach((option) => {
         optionMap[option.attribute_code] = {};
 
-        option.values.forEach(value => {
+        option.values.forEach((value) => {
           optionMap[option.attribute_code][value.value_index] = value.label;
         });
       });
@@ -240,15 +243,16 @@ const formatProducts = (
       return {
         ...baseProduct,
         image:
-          product?.media_gallery_entries && product?.media_gallery_entries?.length > 0
-            ? `${MAGENTO_BASE_URL}/media/catalog/product/${product?.media_gallery_entries[0].file}` :
-            `${MAGENTO_BASE_URL}/media/catalog/product/placeholder/websites/4/mb-logo.webp`,
+          product?.media_gallery_entries &&
+          product?.media_gallery_entries?.length > 0
+            ? `${MAGENTO_BASE_URL}/media/catalog/product/${product?.media_gallery_entries[0].file}`
+            : `${MAGENTO_BASE_URL}/media/catalog/product/placeholder/websites/4/mb-logo.webp`,
         product_url: `${MAGENTO_BASE_URL}/${product.url_path || product.url_key}${product.url_suffix}`,
         variants: product.variants?.map((variant) => {
           const { product: p, attributes } = variant;
           const options = {};
 
-          attributes?.forEach(attr => {
+          attributes?.forEach((attr) => {
             options[attr.code] =
               optionMap[attr.code]?.[attr.value_index] ?? attr.value_index;
           });
@@ -258,7 +262,7 @@ const formatProducts = (
             variant_sku: p.sku,
             variant_name: p.name,
             variant_price: `${getCurrencySymbol(
-              p.price?.regularPrice?.amount?.currency
+              p.price?.regularPrice?.amount?.currency,
             )}${p.price?.regularPrice?.amount?.value ?? 0}`,
             available_for_sale: p.stock_status === "IN_STOCK",
             options,
@@ -288,14 +292,10 @@ const formatStoreMetaInfo = (metadata) => {
   ]);
 
   const normalize = (name) =>
-    name
-      .replace(/&/g, "and")
-      .replace(/\s+/g, " ")
-      .trim();
+    name.replace(/&/g, "and").replace(/\s+/g, " ").trim();
 
   const walk = (node, isInsideBrandSection = false) => {
-    const isBrandSection =
-      isInsideBrandSection || node.name === "Brands A - Z";
+    const isBrandSection = isInsideBrandSection || node.name === "Brands A - Z";
 
     if (
       !isBrandSection &&
@@ -306,9 +306,7 @@ const formatStoreMetaInfo = (metadata) => {
       categories.add(normalize(node.name));
     }
 
-    node.children_data?.forEach((child) =>
-      walk(child, isBrandSection)
-    );
+    node.children_data?.forEach((child) => walk(child, isBrandSection));
   };
 
   walk(metadata);
@@ -326,7 +324,10 @@ const storeMetadata = async () => {
       return cachedMetadata;
     }
 
-    const result = await callMagentoApi("GET", "/categories?searchCriteria[currentPage]=1&searchCriteria[pageSize]=100");
+    const result = await callMagentoApi(
+      "GET",
+      "/categories?searchCriteria[currentPage]=1&searchCriteria[pageSize]=100",
+    );
 
     if (!result) {
       return [];
@@ -415,10 +416,7 @@ const extractSearchTerms = async (query) => {
 const getProductSortConfig = (sortKey) => {
   const normalizedKey = String(sortKey || "").toLowerCase();
 
-  return (
-    SORT_MAPPING[normalizedKey] ||
-    SORT_MAPPING[SortOption.RELEVANCE]
-  );
+  return SORT_MAPPING[normalizedKey] || SORT_MAPPING[SortOption.RELEVANCE];
 };
 
 // Utility function to check courier is An Post based on order data
@@ -461,7 +459,7 @@ const getFinancialStatus = (order) => {
 // Utility function to detect payment method
 const getPaymentMethod = (order) => {
   const info = order.payment?.additional_information || [];
-  return info.find(i => typeof i === "string" && i.includes("Pay By")) || "";
+  return info.find((i) => typeof i === "string" && i.includes("Pay By")) || "";
 };
 
 // Utility function to get order tracking URL from status history comments
@@ -481,12 +479,12 @@ const getTrackingUrl = (order) => {
   }
 
   return "";
-}
+};
 
 // Utility function to format order data
 const formatOrder = (order) => {
   // Format items
-  const items = order.items.map(item => ({
+  const items = order.items.map((item) => ({
     item_id: item.item_id,
     product_id: item.product_id,
     name: item.name,
@@ -519,16 +517,15 @@ const formatOrderTransactions = (order) => {
 
   const totalRefunded = order.items.reduce(
     (sum, item) => sum + (item.amount_refunded || 0),
-    0
+    0,
   );
 
   const totalInvoiced = order.items.reduce(
     (sum, item) => sum + (item.row_invoiced || 0),
-    0
+    0,
   );
 
-  let billingAssessment =
-    "No billing issues detected.";
+  let billingAssessment = "No billing issues detected.";
 
   if (totalRefunded > 0) {
     billingAssessment =
@@ -545,7 +542,7 @@ const formatOrderTransactions = (order) => {
 
     payment_method:
       order.extension_attributes?.payment_additional_info?.find(
-        x => x.key === "method_title"
+        (x) => x.key === "method_title",
       )?.value || payment.method,
 
     payment_code: payment.method,
@@ -561,17 +558,14 @@ const formatOrderTransactions = (order) => {
     billing_assessment: billingAssessment,
 
     payment_summary: {
-      invoiced:
-        totalInvoiced > 0,
+      invoiced: totalInvoiced > 0,
 
-      refunded:
-        totalRefunded > 0,
+      refunded: totalRefunded > 0,
 
-      pending:
-        order.status === "pending",
+      pending: order.status === "pending",
     },
   };
-}
+};
 
 // Export environment variables and utility functions
 module.exports = {
