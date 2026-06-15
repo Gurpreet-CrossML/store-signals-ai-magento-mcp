@@ -131,7 +131,7 @@ const callMagentoApi = async (
   } catch (error) {
     console.error(
       "Magento API Error:",
-      error?.response?.data || error.message || error?.errors,
+      error?.response?.data || error.message || error?.errors || error,
     );
     throw error;
   }
