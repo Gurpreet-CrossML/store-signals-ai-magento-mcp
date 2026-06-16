@@ -32,6 +32,7 @@ const {
   isAnPostCourier,
   formatOrder,
   formatOrderTransactions,
+  formatDiscounts,
 } = require("./utils");
 
 const { getCache, setCache } = require("./cache");
@@ -731,7 +732,8 @@ server.tool(
   Behavior:
   1. Check if requester exists by email.
   2. If not found, create new user.
-  3. Create support ticket linked to requester.
+  3. Create support ticket linked to requester, embedding any
+    image_urls the customer sent while describing the problem.
   4. Return ticket ID in response.
 
   Parameters:
@@ -740,6 +742,8 @@ server.tool(
   - description (string): Detailed problem description
   - session_id (string): Session ID
   - store_code (string): Store Code
+  - image_urls (array, optional): S3/presigned image URLs the customer
+    uploaded while describing the wrong-item issue
   `,
   {
     email: z.string().email().describe("Customer email address"),
@@ -747,9 +751,42 @@ server.tool(
     description: z.string().min(5).describe("Detailed issue description"),
     session_id: z.string().describe("Session ID"),
     store_code: z.string().describe("Store Code"),
+    image_urls: z
+      .array(z.string().url())
+      .optional()
+      .default([])
+      .describe("Image URLs uploaded by the customer during the complaint"),
   },
-  async ({ email, subject, description, session_id, store_code }) => {
+  async ({
+    email,
+    subject,
+    description,
+    session_id,
+    store_code,
+    image_urls,
+  }) => {
     try {
+      const safeImages = Array.isArray(image_urls)
+        ? image_urls.filter(Boolean)
+        : [];
+
+      let htmlBody = `<p>${description.replace(/\n/g, "<br/>")}</p>`;
+
+      if (safeImages.length > 0) {
+        const imageBlocks = safeImages
+          .map(
+            (url, idx) =>
+              `<p><strong>Image ${idx + 1}:</strong><br/>` +
+              `<img src="${url}" alt="Customer image ${idx + 1}" ` +
+              `style="max-width:600px;border:1px solid #ddd;border-radius:4px;margin-top:6px;" /></p>`,
+          )
+          .join("\n");
+
+        htmlBody +=
+          `\n<hr/>\n<p><strong>Customer-uploaded images (${safeImages.length}):</strong></p>\n` +
+          imageBlocks;
+      }
+
       const authConfig = {
         auth: {
           username: `${ZENDESK_USERNAME}/token`,
@@ -802,7 +839,7 @@ server.tool(
           ticket: {
             subject: subject,
             comment: {
-              body: description,
+              html_body: htmlBody,
             },
             requester_id: requesterId,
             priority: "normal",
@@ -827,6 +864,7 @@ server.tool(
         thread_id: session_id,
         store_code: store_code,
         ticket_id: ticketId,
+        image_urls: safeImages,
       };
 
       callBackendAPI("POST", `/support/tickets/`, payload);
@@ -949,6 +987,102 @@ server.tool(
           {
             type: "text",
             text: `Error fetching order transactions: ${error.message}`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
+
+// ######### 10. List Available Discounts #########
+server.tool(
+  "list_available_discounts",
+  `List all available discounts from the store.
+  Returns active discount codes, automatic discounts (price rules), and their details.
+  `,
+  {
+    page: z.number().optional().default(1),
+    pageSize: z.number().optional().default(20),
+  },
+  async ({ page = 1, pageSize = 20 }) => {
+    try {
+      const cacheKey = `available_discounts:${page}:${pageSize}`;
+      const cached = await getCache(cacheKey);
+      if (cached) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(cached, null, 2),
+            },
+          ],
+        };
+      }
+
+      const response = await callMagentoApi(
+        "GET",
+        `/salesRules/search?searchCriteria[filter_groups][0][filters][0][field]=is_active&searchCriteria[filter_groups][0][filters][0][value]=1&searchCriteria[filter_groups][0][filters][0][condition_type]=eq&searchCriteria[currentPage]=${page}&searchCriteria[pageSize]=${pageSize}`,
+      );
+
+      if (!response?.items || response?.items?.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "No discounts found.",
+            },
+          ],
+        };
+      }
+
+      const discounts = formatDiscounts(response?.items);
+
+      if (discounts.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "No discounts found.",
+            },
+          ],
+        };
+      }
+
+      const payload = {
+        page,
+        pageSize,
+        total: response.total_count,
+        totalPages: Math.ceil(response.total_count / pageSize),
+        hasNextPage: page * pageSize < response.total_count,
+        nextPage: page * pageSize < response.total_count ? page + 1 : null,
+        discounts,
+      };
+
+      try {
+        await setCache(cacheKey, payload);
+      } catch (cacheError) {
+        console.warn(
+          "available_discounts cache set failed:",
+          cacheError?.message || cacheError,
+        );
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(payload, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("Error fetching discounts:", error);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching available discounts: ${error.message}`,
           },
         ],
         isError: true,
