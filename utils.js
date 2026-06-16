@@ -1,10 +1,6 @@
 const axios = require("axios");
 const dotenv = require("dotenv");
 const https = require("https");
-// const {
-//   storeMetadataQuery,
-//   relatedProductsQuery,
-// } = require("./graphql_queries");
 const { getCache, setCache } = require("./cache");
 
 // Load environment variables from .env file
@@ -14,6 +10,7 @@ const MAGENTO_BASE_URL = process.env.MAGENTO_BASE_URL;
 const MAGENTO_API_TOKEN = process.env.MAGENTO_API_TOKEN;
 const SORT_CODE = process.env.SORT_CODE;
 const SORT_DIR = process.env.SORT_DIR;
+const WEBSITE_ID = parseInt(process.env.WEBSITE_ID || 4);
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 const BACKEND_API_URL = process.env.BACKEND_API_URL;
@@ -31,6 +28,7 @@ const allEnvironmentVariables = {
   MAGENTO_API_TOKEN,
   SORT_CODE,
   SORT_DIR,
+  WEBSITE_ID,
   SMTP_USER,
   SMTP_PASS,
   BACKEND_API_URL,
@@ -567,6 +565,55 @@ const formatOrderTransactions = (order) => {
   };
 };
 
+// Utility function to format discounts rules
+const formatDiscounts = (rules) => {
+  if (!rules || !Array.isArray(rules)) return [];
+  return (
+    rules
+      // Only active rules for the specified website
+      .filter(
+        (rule) =>
+          rule.is_active &&
+          Array.isArray(rule.website_ids) &&
+          rule.website_ids.includes(WEBSITE_ID),
+      )
+
+      // Convert each rule to a human-readable summary
+      .map((rule) => {
+        const benefits = [];
+
+        // Percentage discount
+        if (rule.discount_amount > 0) {
+          benefits.push(`${rule.discount_amount}% off`);
+        }
+
+        // Free shipping
+        if (rule.simple_free_shipping === "1") {
+          benefits.push("free shipping");
+        }
+
+        // Skip rules with no customer-visible benefit
+        if (benefits.length === 0) {
+          return null;
+        }
+
+        return {
+          // Human readable title
+          title: rule.name,
+
+          // Short summary for LLM
+          summary: `${rule.name}: ${benefits.join(" + ")}`,
+
+          // Structured data if needed later
+          benefits,
+
+          couponRequired: rule.coupon_type === "SPECIFIC_COUPON",
+        };
+      })
+      .filter(Boolean)
+  );
+};
+
 // Export environment variables and utility functions
 module.exports = {
   // envs
@@ -594,4 +641,5 @@ module.exports = {
   isAnPostCourier,
   formatOrder,
   formatOrderTransactions,
+  formatDiscounts,
 };
