@@ -622,7 +622,6 @@ const determineRefundStatus = (order, creditMemos) => {
   // Magento credit memos don't have a "failed" state natively,
   // but state=4 is cancelled which we treat as failed.
   const MEMO_STATE_CANCELLED = 4;
-  const MEMO_STATE_REFUNDED = 2; // completed/refunded
   const MEMO_STATE_OPEN = 1; // pending/open
 
   const hasCancelled = creditMemos.some(
