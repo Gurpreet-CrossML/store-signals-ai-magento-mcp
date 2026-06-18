@@ -248,11 +248,19 @@ const formatProducts = (products, full_details = false) => {
         product_url: `${MAGENTO_BASE_URL}/${product.url_path || product.url_key}${product.url_suffix}`,
         variants: product.variants?.map((variant) => {
           const { product: p, attributes } = variant;
-          const options = {};
+          const options = [];
 
           attributes?.forEach((attr) => {
-            options[attr.code] =
-              optionMap[attr.code]?.[attr.value_index] ?? attr.value_index;
+            const optionName =
+              product.configurable_options?.find(
+                (opt) => opt.attribute_code === attr.code
+              )?.label || attr.code;
+
+            options.push({
+              name: optionName,
+              value:
+                optionMap[attr.code]?.[attr.value_index] ?? attr.value_index,
+            });
           });
 
           return {
