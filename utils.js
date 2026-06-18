@@ -622,13 +622,18 @@ const determineRefundStatus = (order, creditMemos) => {
   // Magento credit memos don't have a "failed" state natively,
   // but state=4 is cancelled which we treat as failed.
   const MEMO_STATE_CANCELLED = 4;
-  const MEMO_STATE_REFUNDED  = 2; // completed/refunded
-  const MEMO_STATE_OPEN      = 1; // pending/open
+  const MEMO_STATE_REFUNDED = 2; // completed/refunded
+  const MEMO_STATE_OPEN = 1; // pending/open
 
-  const hasCancelled = creditMemos.some((m) => m.state === MEMO_STATE_CANCELLED);
-  const hasPending   = creditMemos.some((m) => m.state === MEMO_STATE_OPEN);
+  const hasCancelled = creditMemos.some(
+    (m) => m.state === MEMO_STATE_CANCELLED,
+  );
+  const hasPending = creditMemos.some((m) => m.state === MEMO_STATE_OPEN);
 
-  if (hasCancelled && creditMemos.every((m) => m.state === MEMO_STATE_CANCELLED)) {
+  if (
+    hasCancelled &&
+    creditMemos.every((m) => m.state === MEMO_STATE_CANCELLED)
+  ) {
     return "REFUND_FAILED";
   }
   if (hasPending) return "REFUND_PENDING";
@@ -663,9 +668,9 @@ const formatRefundStatus = (order, creditMemos) => {
     last_refund_date: lastMemo?.created_at ?? null,
     currency: order.order_currency_code,
     total: `${getCurrencySymbol(order.order_currency_code)}${order.grand_total || 0}`,
-    total_refunded: `${getCurrencySymbol(order.order_currency_code)}${
-      creditMemos.reduce((sum, m) => sum + (m.grand_total || 0), 0).toFixed(2)
-    }`,
+    total_refunded: `${getCurrencySymbol(order.order_currency_code)}${creditMemos
+      .reduce((sum, m) => sum + (m.grand_total || 0), 0)
+      .toFixed(2)}`,
   };
 };
 // Export environment variables and utility functions

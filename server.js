@@ -940,9 +940,7 @@ server.tool(
   `,
   {
     email: z.string().email().describe("Customer email address"),
-    order_id: z
-      .number()
-      .describe("10-digit order number (e.g. 1234567890)"),
+    order_id: z.number().describe("10-digit order number (e.g. 1234567890)"),
     session_id: z.string().describe("Session identifier"),
     customer_id: z
       .string()
