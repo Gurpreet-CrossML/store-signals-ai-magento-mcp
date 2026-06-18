@@ -19,9 +19,6 @@ const {
   SMTP_PASS,
   SORT_CODE,
   SORT_DIR,
-  ZENDESK_USERNAME,
-  ZENDESK_PASSWORD,
-  ZENDESK_API_URL,
   callMagentoApi,
   callBackendAPI,
   logProductViewEvents,
@@ -33,6 +30,7 @@ const {
   formatOrder,
   formatOrderTransactions,
   formatDiscounts,
+  formatRefundStatus,
 } = require("./utils");
 
 const { getCache, setCache } = require("./cache");
@@ -724,175 +722,7 @@ server.tool(
   },
 );
 
-// ######### 8. Create Support Ticket #########
-server.tool(
-  "create_support_ticket",
-  `Create a support ticket for a customer issue.
-
-  Behavior:
-  1. Check if requester exists by email.
-  2. If not found, create new user.
-  3. Create support ticket linked to requester, embedding any
-    image_urls the customer sent while describing the problem.
-  4. Return ticket ID in response.
-
-  Parameters:
-  - email (string): Customer email address
-  - subject (string): Ticket subject line
-  - description (string): Detailed problem description
-  - session_id (string): Session ID
-  - store_code (string): Store Code
-  - image_urls (array, optional): S3/presigned image URLs the customer
-    uploaded while describing the wrong-item issue
-  `,
-  {
-    email: z.string().email().describe("Customer email address"),
-    subject: z.string().min(3).describe("Short ticket subject"),
-    description: z.string().min(5).describe("Detailed issue description"),
-    session_id: z.string().describe("Session ID"),
-    store_code: z.string().describe("Store Code"),
-    image_urls: z
-      .array(z.string().url())
-      .optional()
-      .default([])
-      .describe("Image URLs uploaded by the customer during the complaint"),
-  },
-  async ({
-    email,
-    subject,
-    description,
-    session_id,
-    store_code,
-    image_urls,
-  }) => {
-    try {
-      const safeImages = Array.isArray(image_urls)
-        ? image_urls.filter(Boolean)
-        : [];
-
-      let htmlBody = `<p>${description.replace(/\n/g, "<br/>")}</p>`;
-
-      if (safeImages.length > 0) {
-        const imageBlocks = safeImages
-          .map(
-            (url, idx) =>
-              `<p><strong>Image ${idx + 1}:</strong><br/>` +
-              `<img src="${url}" alt="Customer image ${idx + 1}" ` +
-              `style="max-width:600px;border:1px solid #ddd;border-radius:4px;margin-top:6px;" /></p>`,
-          )
-          .join("\n");
-
-        htmlBody +=
-          `\n<hr/>\n<p><strong>Customer-uploaded images (${safeImages.length}):</strong></p>\n` +
-          imageBlocks;
-      }
-
-      const authConfig = {
-        auth: {
-          username: `${ZENDESK_USERNAME}/token`,
-          password: ZENDESK_PASSWORD,
-        },
-        headers: {
-          "Content-Type": "application/json",
-        },
-      };
-
-      let requesterId = null;
-
-      // Search existing user
-      const searchResponse = await axios.get(
-        `${ZENDESK_API_URL}/users/search.json?query=${encodeURIComponent(email)}`,
-        authConfig,
-      );
-
-      if (searchResponse?.data?.users?.length > 0) {
-        requesterId = searchResponse.data.users[0].id;
-      }
-
-      // Create user if not found
-      if (!requesterId) {
-        const userResponse = await axios.post(
-          `${ZENDESK_API_URL}/users.json`,
-          {
-            user: {
-              name: email.split("@")[0],
-              email: email,
-            },
-          },
-          authConfig,
-        );
-
-        requesterId = userResponse?.data?.user?.id;
-      }
-
-      if (!requesterId) {
-        return {
-          content: [{ type: "text", text: "Unable to create requester user." }],
-          isError: true,
-        };
-      }
-
-      // Create ticket
-      const ticketResponse = await axios.post(
-        `${ZENDESK_API_URL}/tickets.json`,
-        {
-          ticket: {
-            subject: subject,
-            comment: {
-              html_body: htmlBody,
-            },
-            requester_id: requesterId,
-            priority: "normal",
-          },
-        },
-        authConfig,
-      );
-
-      const ticketId = ticketResponse?.data?.ticket?.id;
-
-      if (!ticketId) {
-        return {
-          content: [{ type: "text", text: "Failed to create support ticket." }],
-          isError: true,
-        };
-      }
-
-      const payload = {
-        requester_id: requesterId,
-        subject: subject,
-        description: description,
-        thread_id: session_id,
-        store_code: store_code,
-        ticket_id: ticketId,
-        image_urls: safeImages,
-      };
-
-      callBackendAPI("POST", `/support/tickets/`, payload);
-
-      // Success Response
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Support ticket #${ticketId} created successfully. Our team will contact you soon.`,
-          },
-        ],
-      };
-    } catch (error) {
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error creating support ticket: ${error.message}`,
-          },
-        ],
-        isError: true,
-      };
-    }
-  },
-);
-
-// ######### 9. Order Transactions #########
+// ######### 8. Order Transactions #########
 server.tool(
   "get_order_transactions",
   `Fetch payment transactions for a specific order.
@@ -995,7 +825,7 @@ server.tool(
   },
 );
 
-// ######### 10. List Available Discounts #########
+// ######### 9. List Available Discounts #########
 server.tool(
   "list_available_discounts",
   `List all available discounts from the store.
@@ -1090,7 +920,132 @@ server.tool(
     }
   },
 );
+// ######### 10. Get Order Refund Status #########
+server.tool(
+  "get_refund_status",
+  `Fetch the refund status of a specific order by order number and customer email.
 
+  Returns one of the following statuses:
+    - NOT_REFUNDED       : No refunds exist on this order
+    - FULLY_REFUNDED     : Order has been fully refunded
+    - PARTIALLY_REFUNDED : Order has been partially refunded
+    - REFUND_PENDING     : A refund is initiated but not yet settled
+    - REFUND_FAILED      : All refund attempts were cancelled
+
+  Parameters:
+  @param {string} email       - Customer email associated with the order
+  @param {number} order_id    - 10-digit order number (e.g. 1234567890)
+  @param {string} session_id  - Session identifier
+  @param {string} customer_id - Customer ID (optional; skips email verification if provided)
+  `,
+  {
+    email: z.string().email().describe("Customer email address"),
+    order_id: z
+      .number()
+      .describe("10-digit order number (e.g. 1234567890)"),
+    session_id: z.string().describe("Session identifier"),
+    customer_id: z
+      .string()
+      .optional()
+      .describe("Customer ID (optional, pass empty string if unknown)"),
+  },
+  async ({ email, order_id, session_id, customer_id = "" }) => {
+    try {
+      // 1. Email verification (skipped when customer_id is known)
+      if (!customer_id) {
+        const verificationStatus = await callBackendAPI(
+          "POST",
+          "/chat/email/verify-status/",
+          { thread_id: session_id, email },
+        );
+
+        if (!verificationStatus?.is_verified) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Please verify your email before accessing refund information.",
+              },
+            ],
+            isError: true,
+          };
+        }
+      }
+
+      // 2. Fetch the order by increment_id
+      const endpoint =
+        `/orders?searchCriteria[filter_groups][0][filters][0][field]=increment_id` +
+        `&searchCriteria[filter_groups][0][filters][0][value]=${order_id}` +
+        `&searchCriteria[filter_groups][0][filters][0][condition_type]=eq`;
+
+      const apiResponse = await callMagentoApi("GET", endpoint);
+      const order = apiResponse?.items?.[0];
+
+      if (!order) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `We couldn't locate order #${order_id}. Please verify the order number and try again.`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      // 3. Validate email ownership
+      if (order.customer_email !== email) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "We couldn't find an order matching the provided order number and email address. Please verify both details and try again.",
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      // 4. Fetch credit memos (refunds) for this order
+      const refundsResponse = await callMagentoApi(
+        "GET",
+        `/orders/${order.entity_id}/refunds`,
+      );
+
+      // Magento returns an array directly, not wrapped in { items: [] }
+      const creditMemos = Array.isArray(refundsResponse)
+        ? refundsResponse
+        : (refundsResponse?.items ?? []);
+
+      // 5. Format and return
+      const payload = formatRefundStatus(order, creditMemos);
+
+      console.log(
+        `get_refund_status: order_id=${order_id} | status=${payload.refund_status} | session=${session_id}`,
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(payload, null, 2),
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("get_refund_status error:", error.message);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Unable to retrieve refund details for order #${order_id}. Please try again later.`,
+          },
+        ],
+        isError: true,
+      };
+    }
+  },
+);
 // ********************************** End of MCP Tools **********************************
 
 // Start the server
