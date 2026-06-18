@@ -645,7 +645,9 @@ const searchProductsByNames = async (
         results.push({
           product_name: name,
           product_detail:
-            cached.products.length > 0 ? cached.products[0] : "Product not found",
+            cached.products.length > 0
+              ? cached.products[0]
+              : "Product not found",
         });
         continue;
       }
@@ -685,7 +687,9 @@ const searchProductsByNames = async (
       const entry = {
         product_name: name,
         product_detail:
-          formattedProducts.length > 0 ? formattedProducts[0] : "Product not found",
+          formattedProducts.length > 0
+            ? formattedProducts[0]
+            : "Product not found",
       };
 
       try {
@@ -742,5 +746,5 @@ module.exports = {
   formatOrder,
   formatOrderTransactions,
   formatDiscounts,
-  searchProductsByNames
+  searchProductsByNames,
 };
