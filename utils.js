@@ -656,7 +656,7 @@ const searchProductsByNames = async (
         query: productSearchByQuery,
         variables: {
           search: name,
-          pageSize: 5,
+          pageSize: 1,
           currentPage: 1,
           sortCode: SORT_CODE,
           sortDir: SORT_DIR,
@@ -671,7 +671,7 @@ const searchProductsByNames = async (
         "POST",
         "",
         graphqlQuery,
-        "", // do not forward store_code to GraphQL
+        store_code, // do not forward store_code to GraphQL
         true, // isGraphQL
       );
 

@@ -1092,7 +1092,7 @@ server.tool(
   },
 );
 
-// ######### 14. Search Products by Names (batch, one-by-one, Muti Product Search) #########
+// ######### 11. Search Products by Names (batch, one-by-one, Muti Product Search) #########
 server.tool(
   "search_products_by_names",
   `Search for multiple products one by one using an array of product names.
