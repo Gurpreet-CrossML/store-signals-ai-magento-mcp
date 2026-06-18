@@ -253,7 +253,7 @@ const formatProducts = (products, full_details = false) => {
           attributes?.forEach((attr) => {
             const optionName =
               product.configurable_options?.find(
-                (opt) => opt.attribute_code === attr.code
+                (opt) => opt.attribute_code === attr.code,
               )?.label || attr.code;
 
             options.push({
