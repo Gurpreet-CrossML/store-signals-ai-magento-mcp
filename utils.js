@@ -2,6 +2,7 @@ const axios = require("axios");
 const dotenv = require("dotenv");
 const https = require("https");
 const { getCache, setCache } = require("./cache");
+const { productSearchByQuery } = require("./graphql_queries");
 
 // Load environment variables from .env file
 dotenv.config();
@@ -622,6 +623,101 @@ const formatDiscounts = (rules) => {
   );
 };
 
+// Utility function to search for a list of products one by one by their names.
+// Accepts an array of product name strings and searches each sequentially against the Magento catalog.
+// Returns an array of results — one entry per product name — each containing either the matched
+// product(s) or an indicator that no match was found.
+const searchProductsByNames = async (
+  product_names,
+  session_id,
+  store_code,
+  full_details = false,
+) => {
+  const results = [];
+
+  for (const name of product_names) {
+    try {
+      const cacheKey = `search:${name}:${full_details ? "full" : "brief"}`;
+      const cached = await getCache(cacheKey);
+
+      if (cached) {
+        logProductViewEvents(cached.products, session_id, store_code);
+        results.push({
+          product_name: name,
+          product_detail:
+            cached.products.length > 0
+              ? cached.products[0]
+              : "Product not found",
+        });
+        continue;
+      }
+
+      const graphqlQuery = {
+        query: productSearchByQuery,
+        variables: {
+          search: name,
+          pageSize: 1,
+          currentPage: 1,
+          sortCode: SORT_CODE,
+          sortDir: SORT_DIR,
+        },
+      };
+
+      // Pass empty store_code so Magento GraphQL uses its default store context.
+      // Forwarding an AI-supplied store_code as a Store header causes a 500
+      // NoSuchEntityException from the SagePaySuite plugin when the code is
+      // not a recognised Magento store view.
+      const searchResponse = await callMagentoApi(
+        "POST",
+        "",
+        graphqlQuery,
+        store_code, // do not forward store_code to GraphQL
+        true, // isGraphQL
+      );
+
+      let formattedProducts = [];
+
+      if (searchResponse?.data?.products?.items?.length > 0) {
+        formattedProducts = formatProducts(
+          searchResponse.data.products.items,
+          full_details,
+        );
+      }
+
+      const entry = {
+        product_name: name,
+        product_detail:
+          formattedProducts.length > 0
+            ? formattedProducts[0]
+            : "Product not found",
+      };
+
+      try {
+        await setCache(cacheKey, { products: formattedProducts });
+      } catch (e) {
+        console.warn(
+          `searchProductsByNames cache set failed for "${name}":`,
+          e?.message || e,
+        );
+      }
+
+      logProductViewEvents(formattedProducts, session_id, store_code);
+      results.push(entry);
+    } catch (error) {
+      console.error(
+        `searchProductsByNames error for "${name}":`,
+        error.message,
+      );
+      results.push({
+        product_name: name,
+        product_detail: "Product not found",
+      });
+    }
+  }
+
+  return results;
+};
+
 // Export environment variables and utility functions
 module.exports = {
   // envs
@@ -650,4 +746,5 @@ module.exports = {
   formatOrder,
   formatOrderTransactions,
   formatDiscounts,
+  searchProductsByNames,
 };
