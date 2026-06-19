@@ -2,6 +2,7 @@ const axios = require("axios");
 const dotenv = require("dotenv");
 const https = require("https");
 const { getCache, setCache } = require("./cache");
+const { productSearchByQuery } = require("./graphql_queries");
 
 // Load environment variables from .env file
 dotenv.config();
@@ -15,9 +16,6 @@ const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
 const BACKEND_API_URL = process.env.BACKEND_API_URL;
 const PORT = process.env.PORT;
-const ZENDESK_API_URL = process.env.ZENDESK_API_URL;
-const ZENDESK_USERNAME = process.env.ZENDESK_USERNAME;
-const ZENDESK_PASSWORD = process.env.ZENDESK_PASSWORD;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_MODEL = process.env.OPENAI_MODEL;
 const MCP_NAME = process.env.MCP_NAME;
@@ -33,9 +31,6 @@ const allEnvironmentVariables = {
   SMTP_PASS,
   BACKEND_API_URL,
   PORT,
-  ZENDESK_API_URL,
-  ZENDESK_USERNAME,
-  ZENDESK_PASSWORD,
   OPENAI_API_KEY,
   OPENAI_MODEL,
   MCP_NAME,
@@ -622,6 +617,157 @@ const formatDiscounts = (rules) => {
   );
 };
 
+// Utility function to search for a list of products one by one by their names.
+// Accepts an array of product name strings and searches each sequentially against the Magento catalog.
+// Returns an array of results — one entry per product name — each containing either the matched
+// product(s) or an indicator that no match was found.
+const searchProductsByNames = async (
+  product_names,
+  session_id,
+  store_code,
+  full_details = false,
+) => {
+  const results = [];
+
+  for (const name of product_names) {
+    try {
+      const cacheKey = `search:${name}:${full_details ? "full" : "brief"}`;
+      const cached = await getCache(cacheKey);
+
+      if (cached) {
+        logProductViewEvents(cached.products, session_id, store_code);
+        results.push({
+          product_name: name,
+          product_detail:
+            cached.products.length > 0
+              ? cached.products[0]
+              : "Product not found",
+        });
+        continue;
+      }
+
+      const graphqlQuery = {
+        query: productSearchByQuery,
+        variables: {
+          search: name,
+          pageSize: 1,
+          currentPage: 1,
+          sortCode: SORT_CODE,
+          sortDir: SORT_DIR,
+        },
+      };
+
+      // Pass empty store_code so Magento GraphQL uses its default store context.
+      // Forwarding an AI-supplied store_code as a Store header causes a 500
+      // NoSuchEntityException from the SagePaySuite plugin when the code is
+      // not a recognised Magento store view.
+      const searchResponse = await callMagentoApi(
+        "POST",
+        "",
+        graphqlQuery,
+        store_code, // do not forward store_code to GraphQL
+        true, // isGraphQL
+      );
+
+      let formattedProducts = [];
+
+      if (searchResponse?.data?.products?.items?.length > 0) {
+        formattedProducts = formatProducts(
+          searchResponse.data.products.items,
+          full_details,
+        );
+      }
+
+      const entry = {
+        product_name: name,
+        product_detail:
+          formattedProducts.length > 0
+            ? formattedProducts[0]
+            : "Product not found",
+      };
+
+      try {
+        await setCache(cacheKey, { products: formattedProducts });
+      } catch (e) {
+        console.warn(
+          `searchProductsByNames cache set failed for "${name}":`,
+          e?.message || e,
+        );
+      }
+
+      logProductViewEvents(formattedProducts, session_id, store_code);
+      results.push(entry);
+    } catch (error) {
+      console.error(
+        `searchProductsByNames error for "${name}":`,
+        error.message,
+      );
+      results.push({
+        product_name: name,
+        product_detail: "Product not found",
+      });
+    }
+  }
+
+  return results;
+};
+// Utility function to determine refund status based on credit memos and order data
+const determineRefundStatus = (order, creditMemos) => {
+  if (!creditMemos || creditMemos.length === 0) return "NOT_REFUNDED";
+
+  // Magento credit memos don't have a "failed" state natively,
+  // but state=4 is cancelled which we treat as failed.
+  const MEMO_STATE_CANCELLED = 4;
+  const MEMO_STATE_OPEN = 1; // pending/open
+
+  const hasCancelled = creditMemos.some(
+    (m) => m.state === MEMO_STATE_CANCELLED,
+  );
+  const hasPending = creditMemos.some((m) => m.state === MEMO_STATE_OPEN);
+
+  if (
+    hasCancelled &&
+    creditMemos.every((m) => m.state === MEMO_STATE_CANCELLED)
+  ) {
+    return "REFUND_FAILED";
+  }
+  if (hasPending) return "REFUND_PENDING";
+
+  // Compare refunded amount vs order grand total
+  const totalRefunded = creditMemos.reduce(
+    (sum, m) => sum + (m.grand_total || 0),
+    0,
+  );
+  const orderTotal = parseFloat(order.grand_total || 0);
+
+  // Allow ±0.01 tolerance for floating-point rounding
+  if (Math.abs(totalRefunded - orderTotal) <= 0.01) return "FULLY_REFUNDED";
+
+  return "PARTIALLY_REFUNDED";
+};
+
+// Utility function to format refund status data
+const formatRefundStatus = (order, creditMemos) => {
+  const status = determineRefundStatus(order, creditMemos);
+
+  const lastMemo =
+    creditMemos.length > 0 ? creditMemos[creditMemos.length - 1] : null;
+
+  return {
+    order_id: order.increment_id,
+    magento_order_id: order.entity_id,
+    email: order.customer_email,
+    refund_status: status,
+    financial_status: order.status,
+    refund_count: creditMemos.length,
+    last_refund_date: lastMemo?.created_at ?? null,
+    currency: order.order_currency_code,
+    total: `${getCurrencySymbol(order.order_currency_code)}${order.grand_total || 0}`,
+    total_refunded: `${getCurrencySymbol(order.order_currency_code)}${creditMemos
+      .reduce((sum, m) => sum + (m.grand_total || 0), 0)
+      .toFixed(2)}`,
+  };
+};
 // Export environment variables and utility functions
 module.exports = {
   // envs
@@ -631,9 +777,6 @@ module.exports = {
   SMTP_USER,
   SMTP_PASS,
   BACKEND_API_URL,
-  ZENDESK_API_URL,
-  ZENDESK_USERNAME,
-  ZENDESK_PASSWORD,
   OPENAI_API_KEY,
   OPENAI_MODEL,
   SORT_CODE,
@@ -650,4 +793,7 @@ module.exports = {
   formatOrder,
   formatOrderTransactions,
   formatDiscounts,
+  searchProductsByNames,
+  determineRefundStatus,
+  formatRefundStatus,
 };
