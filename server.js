@@ -60,9 +60,13 @@ const transporter = nodemailer.createTransport({
 // ######### 1. Search Products #########
 server.tool(
   "search_products",
-  `Search for products based on the user's query. 
+  `Search for products based on the user's query with advanced filtering and sorting options.
   Returns a list of products with their details, including name, price, stock status, and image URL.
-  Supports pagination with page size and current page parameters.
+
+  Supports:
+  - Price range filtering (min_price, max_price): e.g., "products under $500" or "expensive products"
+  - Price sorting: e.g., "cheapest first", "most expensive first"
+  - Pagination with page size and current page parameters.
 
   Parameters:
   @param {string} query: The search query (product name, description, etc.)
@@ -71,6 +75,9 @@ server.tool(
   @param {string} session_id: Session ID
   @param {string} store_code: Store name or code
   @param {boolean} full_details: 
+  @param {number} min_price: Minimum price filter (optional)
+  @param {number} max_price: Maximum price filter (optional)
+  @param {string} sort_by_price: Sort order by price - "asc" (cheapest first) or "desc" (most expensive first) (optional)
   `,
   {
     query: z
@@ -89,6 +96,20 @@ server.tool(
       .describe(
         "Whether to return full product details including variants, images, and URLs. Defaults to false.",
       ),
+    min_price: z
+      .string()
+      .optional()
+      .describe("Minimum price filter (e.g., 100 for products above $100)"),
+    max_price: z
+      .string()
+      .optional()
+      .describe("Maximum price filter (e.g., 500 for products under $500)"),
+    sort_by_price: z
+      .enum(["asc", "desc"])
+      .optional()
+      .describe(
+        'Sort order by price: "asc" for cheapest first, "desc" for most expensive first',
+      ),
   },
   async ({
     query,
@@ -97,9 +118,13 @@ server.tool(
     page_size = 4,
     current_page = 1,
     full_details = false,
+    min_price = null,
+    max_price = null,
+    sort_by_price = null,
   }) => {
     try {
-      const cacheKey = `search:${query}:${full_details ? "full" : "brief"}`;
+      const filterKey = `${min_price || ""}:${max_price || ""}:${sort_by_price || ""}`;
+      const cacheKey = `search:${query}:${filterKey && `filter_by_${filterKey}`}:${full_details ? "full" : "brief"}`;
       const cached = await getCache(cacheKey);
       if (cached) {
         logProductViewEvents(cached.products, session_id, store_code);
@@ -113,14 +138,30 @@ server.tool(
         };
       }
 
+      // Determine sort order
+      let sortOrder = {
+        code: SORT_CODE, // Default sort code
+        direction: SORT_DIR, // Default sort direction
+      };
+
+
+      if (sort_by_price === "asc" || sort_by_price === "desc") {
+        sortOrder = {
+          code: "price",
+          direction: sort_by_price === "asc" ? "ASC" : "DESC",
+        };
+      }
+
       const graphqlQuery = {
         query: productSearchByQuery,
         variables: {
           search: query,
-          sortCode: SORT_CODE,
-          sortDir: SORT_DIR,
+          sortCode: sortOrder.code,
+          sortDir: sortOrder.direction,
           pageSize: page_size,
           currentPage: current_page,
+          priceMin: min_price || "0",
+          priceMax: max_price || "100000"
         },
       };
 
@@ -156,8 +197,10 @@ server.tool(
             query: productSearchByQuery,
             variables: {
               search: q,
-              sortCode: SORT_CODE,
-              sortDir: SORT_DIR,
+              sortCode: sortOrder.code,
+              sortDir: sortOrder.direction,
+              priceMin: min_price || "0",
+              priceMax: max_price || "100000"
             },
           };
 

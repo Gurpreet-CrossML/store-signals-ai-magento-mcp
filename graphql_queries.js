@@ -1,7 +1,13 @@
 // Query to search products by a free-text `search` string.
-const productSearchByQuery = `query searchProducts($search: String!, $pageSize: Int!, $currentPage: Int!, $sortCode: String!, $sortDir: SortEnum!) {
+const productSearchByQuery = `query searchProducts($search: String!, $pageSize: Int!, $currentPage: Int!, $sortCode: String!, $sortDir: SortEnum!, $priceMin: String, $priceMax: String) {
     products(
         search: $search
+        filter: {
+            price: {
+                from: $priceMin
+                to: $priceMax
+            }
+        }
         sort: {
             mst_sort: {
                 code: $sortCode,
