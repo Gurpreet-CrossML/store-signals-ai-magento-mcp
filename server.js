@@ -199,6 +199,8 @@ server.tool(
               search: q,
               sortCode: sortOrder.code,
               sortDir: sortOrder.direction,
+              pageSize: page_size,
+              currentPage: current_page,
               priceMin: min_price || "0",
               priceMax: max_price || "100000"
             },
@@ -407,6 +409,8 @@ server.tool(
           currentPage: 1,
           sortCode: sortCode,
           sortDir: sortDir,
+          priceMin: "0",
+          priceMax: "100000"
         },
       };
 

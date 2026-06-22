@@ -654,6 +654,8 @@ const searchProductsByNames = async (
           currentPage: 1,
           sortCode: SORT_CODE,
           sortDir: SORT_DIR,
+          priceMin: "0",
+          priceMax: "100000"
         },
       };
 
