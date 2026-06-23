@@ -769,7 +769,322 @@ server.tool(
   },
 );
 
-// ######### 8. Order Transactions #########
+// ######### 8. Update Shipping Address #########
+//
+// Magento port of the Shopify "update_shipping_address" tool. Behavior is
+// intentionally identical to the Shopify version: requires a COMPLETE
+// address every call (no partial patching), re-checks eligibility
+// server-side right before writing (race-condition guard), and returns a
+// `reason` code on every failure path so the calling workflow agent can
+// branch deterministically.
+//
+// Conventions carried over from THIS file's existing tools (not from the
+// Shopify file), since Magento's identity rules differ from Shopify's:
+//   - order_id is a 10-digit number, validated the same way
+//     get_order_detail / get_refund_status validate it in this file.
+//   - order lookup goes through Magento's REST searchCriteria filter on
+//     increment_id, exactly like get_order_detail / get_order_transactions
+//     / get_refund_status already do in this file.
+//   - email ownership is checked explicitly via
+//     `order.customer_email !== email`, matching get_order_detail's
+//     existing pattern, since Magento's order-list-by-email endpoint
+//     (which Shopify's tool relies on) has no direct equivalent used
+//     elsewhere in this file.
+//
+// ASSUMPTION TO VERIFY: this file has no existing precedent anywhere for
+// writing/mutating a Magento order (no cancel_order, no modify_order), so
+// there is nothing in this codebase to confirm the exact endpoint/payload
+// shape your Magento backend expects for an address update. This
+// implementation calls Magento's standard Order Repository REST endpoint:
+//   PUT /V1/orders/{entityId}
+// with the full order entity (entity_id + extension_attributes containing
+// shipping_assignments[0].shipping.address), since that is the
+// conventional Magento 2 REST shape for replacing an order's shipping
+// address. If your backend exposes a different/custom endpoint for this
+// (many Magento setups do, since the core API is awkward for this exact
+// operation), swap step 7 below for that endpoint -- everything else
+// (validation, lookup, eligibility check, response shape) stays the same.
+server.tool(
+  "update_shipping_address",
+  `Update the shipping address on an order that has not yet shipped.
+
+  This tool requires a COMPLETE address every time -- it will not merge
+  partial fields with the existing address. The caller (agent) must build
+  the full address object first (reusing unchanged fields from
+  get_order_detail's existing address, overlaying the fields the customer
+  changed) before calling this tool.
+
+  This tool will refuse the update (isError: true, reason: "ORDER_NOT_ELIGIBLE")
+  if the order is already cancelled or its status is one of: shipped,
+  delivered, fulfilled, partially_fulfilled, out_for_delivery, complete,
+  closed, canceled. This guards against the race condition where an order
+  ships between the agent's eligibility check and the actual address
+  update call.
+
+  Parameters:
+  @param {number} order_id     - The unique ID of the order. Must be exactly 10 digits long.
+  @param {string} email        - Customer email associated with the order
+  @param {string} session_id   - Session identifier
+  @param {string} customer_id  - Customer ID (optional; skips email verification if provided)
+  @param {object} address      - Complete new shipping address (all fields required)
+  `,
+  {
+    order_id: z
+      .number()
+      .describe(
+        "The unique ID of the order to update. Order ID must be exactly 10 digits long.",
+      ),
+    email: z.string().email().describe("Customer email address"),
+    session_id: z.string().describe("Session identifier"),
+    customer_id: z
+      .string()
+      .optional()
+      .describe("Customer ID (optional, pass empty string if unknown)"),
+    address: z
+      .object({
+        first_name: z.string().min(1).describe("Recipient first name"),
+        last_name: z.string().min(1).describe("Recipient last name"),
+        address1: z.string().min(1).describe("Street address, line 1"),
+        address2: z
+          .string()
+          .optional()
+          .default("")
+          .describe("Apartment/unit/suite, line 2 (optional)"),
+        city: z.string().min(1).describe("City"),
+        province: z
+          .string()
+          .optional()
+          .default("")
+          .describe("State/province (region)"),
+        zip: z.string().min(1).describe("Postal/zip code"),
+        country: z
+          .string()
+          .min(1)
+          .describe("Country ISO code (e.g. 'US', 'IN', 'GB')"),
+        phone: z.string().min(1).describe("Contact phone number"),
+      })
+      .describe(
+        "Complete shipping address object. All required fields must be " +
+          "present -- this replaces the order's shipping address wholesale, " +
+          "it does not patch individual fields.",
+      ),
+  },
+  async ({ order_id, email, session_id, customer_id = "", address }) => {
+    // 1. Validate Order ID, same rule as get_order_detail / get_refund_status
+    //    in this file.
+    if (order_id <= 0 || String(order_id).length !== 10) {
+      return {
+        content: [
+          { type: "text", text: "Order ID must be exactly 10 digits long." },
+        ],
+        isError: true,
+        reason: "INVALID_ORDER_ID",
+      };
+    }
+
+    try {
+      // 2. Email verification (skipped when customer_id is already known),
+      //    same pattern as get_order_detail / get_order_transactions /
+      //    get_refund_status.
+      if (!customer_id) {
+        const verificationStatus = await callBackendAPI(
+          "POST",
+          "/chat/email/verify-status/",
+          { thread_id: session_id, email },
+        );
+
+        if (!verificationStatus?.is_verified) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Please verify your email before updating shipping details.",
+              },
+            ],
+            isError: true,
+            reason: "NOT_VERIFIED",
+          };
+        }
+      }
+
+      // 3. Locate the order via REST, same searchCriteria pattern used by
+      //    get_order_detail / get_order_transactions / get_refund_status.
+      const endpoint =
+        `/orders?searchCriteria[filter_groups][0][filters][0][field]=increment_id` +
+        `&searchCriteria[filter_groups][0][filters][0][value]=${order_id}` +
+        `&searchCriteria[filter_groups][0][filters][0][condition_type]=eq`;
+
+      const apiResponse = await callMagentoApi("GET", endpoint);
+      const order = apiResponse?.items?.[0];
+
+      if (!order) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `We couldn't find an order with the number #${order_id}. Please check the order number and try again.`,
+            },
+          ],
+          isError: true,
+          reason: "ORDER_NOT_FOUND",
+        };
+      }
+
+      // 4. Validate email ownership, same explicit check get_order_detail /
+      //    get_order_transactions / get_refund_status already use in this
+      //    file (Magento's order list isn't pre-scoped by email the way
+      //    Shopify's lookup is, so this check is required here).
+      if (order.customer_email !== email) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "We couldn't find an order matching the provided order number and email address. Please verify both details and try again.",
+            },
+          ],
+          isError: true,
+          reason: "ORDER_NOT_FOUND",
+        };
+      }
+
+      // 5. Re-check eligibility server-side -- authoritative guard against
+      //    the race condition (order ships/processes further between the
+      //    agent's earlier eligibility check and this call). Magento's
+      //    native order `status` field uses different strings than
+      //    Shopify's shipment_status, so both are covered here in case
+      //    formatOrder normalises it differently than expected -- check
+      //    against your actual formatOrder output and trim this list if
+      //    it's already normalised upstream.
+      const formatted = formatOrder(order);
+
+      const INELIGIBLE_STATUSES = [
+        "shipped",
+        "delivered",
+        "fulfilled",
+        "partially_fulfilled",
+        "out_for_delivery",
+        "complete",
+        "closed",
+        "canceled",
+        "cancelled",
+      ];
+
+      const currentStatus = (
+        formatted.shipment_status ||
+        formatted.status ||
+        order.status ||
+        ""
+      ).toLowerCase();
+
+      if (INELIGIBLE_STATUSES.includes(currentStatus)) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Order #${order_id} can no longer have its shipping address changed directly -- it is already ${currentStatus}.`,
+            },
+          ],
+          isError: true,
+          reason: "ORDER_NOT_ELIGIBLE",
+          shipment_status: currentStatus,
+        };
+      }
+
+      // 6. Build the full shipping address payload. Like Shopify, this
+      //    replaces the order's shipping address wholesale -- always send
+      //    every field, never a partial patch.
+      const shippingAddressPayload = {
+        firstname: address.first_name,
+        lastname: address.last_name,
+        street: address.address2
+          ? [address.address1, address.address2]
+          : [address.address1],
+        city: address.city,
+        region: address.province || "",
+        postcode: address.zip,
+        country_id: address.country,
+        telephone: address.phone,
+      };
+
+      // 7. Apply the update.
+      //
+      // ASSUMPTION TO VERIFY (see note at top of this block): this calls
+      // Magento's standard Order Repository REST endpoint with the order
+      // entity, mirroring shipping_assignments[0].shipping.address. If
+      // your backend exposes a dedicated/custom endpoint for shipping
+      // address updates instead, replace this call -- the rest of the
+      // tool (validation, lookup, eligibility, response shape) is
+      // independent of this single call.
+      const updateResponse = await callMagentoApi(
+        "PUT",
+        `/orders/${order.entity_id}`,
+        {
+          entity: {
+            entity_id: order.entity_id,
+            extension_attributes: {
+              shipping_assignments: [
+                {
+                  shipping: {
+                    address: shippingAddressPayload,
+                  },
+                },
+              ],
+            },
+          },
+        },
+      );
+
+      if (!updateResponse) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Failed to update the shipping address. Please try again.",
+            },
+          ],
+          isError: true,
+          reason: "UPDATE_FAILED",
+        };
+      }
+
+      console.log(
+        `update_shipping_address: success | order_id=${order_id} | email=${email} | session=${session_id}`,
+      );
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                success: true,
+                order_id: order_id,
+                shipping_address: shippingAddressPayload,
+                message: `The shipping address for order #${order_id} has been updated. A confirmation email will be sent.`,
+              },
+              null,
+              2,
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("update_shipping_address error:", error.message);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error updating shipping address: ${error.message}`,
+          },
+        ],
+        isError: true,
+        reason: "UNEXPECTED_ERROR",
+      };
+    }
+  },
+);
+
+// ######### 9. Order Transactions #########
 server.tool(
   "get_order_transactions",
   `Fetch payment transactions for a specific order.
@@ -872,7 +1187,7 @@ server.tool(
   },
 );
 
-// ######### 9. List Available Discounts #########
+// ######### 10. List Available Discounts #########
 server.tool(
   "list_available_discounts",
   `List all available discounts from the store.
@@ -967,7 +1282,8 @@ server.tool(
     }
   },
 );
-// ######### 10. Get Order Refund Status #########
+
+// ######### 11. Get Order Refund Status #########
 server.tool(
   "get_refund_status",
   `Fetch the refund status of a specific order by order number and customer email.
@@ -1091,7 +1407,8 @@ server.tool(
     }
   },
 );
-// ######### 11. Search Products by Names (batch, one-by-one, Muti Product Search) #########
+
+// ######### 12. Search Products by Names (batch, one-by-one, Muti Product Search) #########
 server.tool(
   "search_products_by_names",
   `Search for multiple products one by one using an array of product names.
