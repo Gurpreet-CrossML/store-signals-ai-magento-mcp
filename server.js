@@ -144,7 +144,6 @@ server.tool(
         direction: SORT_DIR, // Default sort direction
       };
 
-
       if (sort_by_price === "asc" || sort_by_price === "desc") {
         sortOrder = {
           code: "price",
@@ -161,7 +160,7 @@ server.tool(
           pageSize: page_size,
           currentPage: current_page,
           priceMin: min_price || "0",
-          priceMax: max_price || "100000"
+          priceMax: max_price || "100000",
         },
       };
 
@@ -202,7 +201,7 @@ server.tool(
               pageSize: page_size,
               currentPage: current_page,
               priceMin: min_price || "0",
-              priceMax: max_price || "100000"
+              priceMax: max_price || "100000",
             },
           };
 
@@ -410,7 +409,7 @@ server.tool(
           sortCode: sortCode,
           sortDir: sortDir,
           priceMin: "0",
-          priceMax: "100000"
+          priceMax: "100000",
         },
       };
 
@@ -1172,7 +1171,7 @@ server.tool(
         },
       ],
     };
-  }
+  },
 );
 
 // ######### 13. Check Exchange Policy Eligibility #########
@@ -1189,9 +1188,8 @@ server.tool(
         },
       ],
     };
-  }
+  },
 );
-
 
 // ********************************** End of MCP Tools **********************************
 

@@ -655,7 +655,7 @@ const searchProductsByNames = async (
           sortCode: SORT_CODE,
           sortDir: SORT_DIR,
           priceMin: "0",
-          priceMax: "100000"
+          priceMax: "100000",
         },
       };
 
