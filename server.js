@@ -7,8 +7,9 @@ const express = require("express");
 const cors = require("cors");
 const nodemailer = require("nodemailer");
 const {
-  productSearchByQuery,
+  buildProductSearchQuery,
   productSearchBySKU,
+  productSearchByQuery,
 } = require("./graphql_queries");
 const {
   MCP_NAME,
@@ -64,20 +65,27 @@ server.tool(
   Returns a list of products with their details, including name, price, stock status, and image URL.
 
   Supports:
-  - Price range filtering (min_price, max_price): e.g., "products under $500" or "expensive products"
-  - Price sorting: e.g., "cheapest first", "most expensive first"
-  - Pagination with page size and current page parameters.
+  - Free-text search across name, description, SKU, and other searchable attributes.
+  - Price range filtering (min_price, max_price): e.g., "products under $500".
+  - Stock filter (in_stock_only): set true to hide out-of-stock products.
+  - Category filter (category_id): restrict to a Magento category ID.
+  - Sort options: relevance (default), price_asc, price_desc, name_asc, name_desc, newest.
+  - Pagination with page_size and current_page.
+  - Returns total_count + page_info so you can tell the user how many results exist.
+  - Returns aggregations (facets) so you can suggest refinements (brand, size, colour, etc.).
 
   Parameters:
-  @param {string} query: The search query (product name, description, etc.)
-  @param {int} page_size: Number of results per page (default: 4)
-  @param {int} current_page: Page number (default: 1)
-  @param {string} session_id: Session ID
-  @param {string} store_code: Store name or code
-  @param {boolean} full_details: 
-  @param {number} min_price: Minimum price filter (optional)
-  @param {number} max_price: Maximum price filter (optional)
-  @param {string} sort_by_price: Sort order by price - "asc" (cheapest first) or "desc" (most expensive first) (optional)
+  @param {string}  query:         The search query (product name, description, etc.)
+  @param {int}     page_size:     Number of results per page (default: 4)
+  @param {int}     current_page:  Page number (default: 1)
+  @param {string}  session_id:    Session ID
+  @param {string}  store_code:    Store name or code
+  @param {boolean} full_details:  Return full product details incl. variants & images (default: false)
+  @param {string}  min_price:     Minimum price filter (optional)
+  @param {string}  max_price:     Maximum price filter (optional)
+  @param {boolean} in_stock_only: When true, only return IN_STOCK products (optional, default: false)
+  @param {string}  category_id:   Magento category ID to restrict results (optional)
+  @param {string}  sort_by:       "relevance" | "price_asc" | "price_desc" | "name_asc" | "name_desc" | "newest" (default: relevance)
   `,
   {
     query: z
@@ -99,16 +107,35 @@ server.tool(
     min_price: z
       .string()
       .optional()
-      .describe("Minimum price filter (e.g., 100 for products above $100)"),
+      .describe("Minimum price filter (e.g., '100' for products above $100)"),
     max_price: z
       .string()
       .optional()
-      .describe("Maximum price filter (e.g., 500 for products under $500)"),
-    sort_by_price: z
-      .enum(["asc", "desc"])
+      .describe("Maximum price filter (e.g., '500' for products under $500)"),
+    in_stock_only: z
+      .boolean()
       .optional()
       .describe(
-        'Sort order by price: "asc" for cheapest first, "desc" for most expensive first',
+        "When true, only return products that are in stock. Defaults to false (show all).",
+      ),
+    category_id: z
+      .string()
+      .optional()
+      .describe(
+        "Magento category ID to restrict results to a specific category (e.g., '12').",
+      ),
+    sort_by: z
+      .enum([
+        "relevance",
+        "price_asc",
+        "price_desc",
+        "name_asc",
+        "name_desc",
+        "newest",
+      ])
+      .optional()
+      .describe(
+        'Sort order: "relevance" (default) | "price_asc" | "price_desc" | "name_asc" | "name_desc" | "newest".',
       ),
   },
   async ({
@@ -120,11 +147,26 @@ server.tool(
     full_details = false,
     min_price = null,
     max_price = null,
-    sort_by_price = null,
+    in_stock_only = false,
+    category_id = null,
+    sort_by = "relevance",
   }) => {
     try {
-      const filterKey = `${min_price || ""}:${max_price || ""}:${sort_by_price || ""}`;
-      const cacheKey = `search:${query}:${filterKey && `filter_by_${filterKey}`}:${full_details ? "full" : "brief"}`;
+      // Build a deterministic cache key covering every filter dimension.
+      const cacheKey = [
+        "search",
+        query,
+        `page${current_page}x${page_size}`,
+        min_price ? `min${min_price}` : "",
+        max_price ? `max${max_price}` : "",
+        in_stock_only ? "instock" : "",
+        category_id ? `cat${category_id}` : "",
+        sort_by,
+        full_details ? "full" : "brief",
+      ]
+        .filter(Boolean)
+        .join(":");
+
       const cached = await getCache(cacheKey);
       if (cached) {
         logProductViewEvents(cached.products, session_id, store_code);
@@ -138,95 +180,102 @@ server.tool(
         };
       }
 
-      // Determine sort order
-      let sortOrder = {
-        code: SORT_CODE, // Default sort code
-        direction: SORT_DIR, // Default sort direction
-      };
+      // Resolve sort_by → Magento sortCode + sortDir.
+      const { sortCode, sortDir } = (() => {
+        switch (sort_by) {
+          case "price_asc":
+            return { sortCode: "price", sortDir: "ASC" };
+          case "price_desc":
+            return { sortCode: "price", sortDir: "DESC" };
+          case "name_asc":
+            return { sortCode: "name", sortDir: "ASC" };
+          case "name_desc":
+            return { sortCode: "name", sortDir: "DESC" };
+          case "newest":
+            return { sortCode: "new", sortDir: "DESC" };
+          case "relevance":
+          default:
+            return { sortCode: SORT_CODE, sortDir: SORT_DIR };
+        }
+      })();
 
-      if (sort_by_price === "asc" || sort_by_price === "desc") {
-        sortOrder = {
-          code: "price",
-          direction: sort_by_price === "asc" ? "ASC" : "DESC",
-        };
-      }
+      const buildVariables = (searchTerm) => ({
+        search: searchTerm,
+        sortCode,
+        sortDir,
+        pageSize: page_size,
+        currentPage: current_page,
+        priceMin: min_price || "0",
+        priceMax: max_price || "100000",
+        categoryId: category_id || undefined,
+      });
 
-      const graphqlQuery = {
-        query: productSearchByQuery,
-        variables: {
-          search: query,
-          sortCode: sortOrder.code,
-          sortDir: sortOrder.direction,
-          pageSize: page_size,
-          currentPage: current_page,
-          priceMin: min_price || "0",
-          priceMax: max_price || "100000",
-        },
-      };
-
-      // Call Magento API to search products
-      const searchResponse = await callMagentoApi(
-        "POST",
-        "",
-        graphqlQuery,
-        store_code,
-        true,
-      );
-
-      // Format the products data to be returned
-      let formattedProducts = formatProducts(
-        searchResponse?.data?.products?.items || [],
-        full_details,
-      );
-
-      // Final response object to be returned, which may include related products if found.
-      const result = {
-        products: formattedProducts,
-      };
-
-      // If no products found with the initial query, try extracting keywords and searching again.
-      if (result?.products?.length === 0) {
-        const keywords = await extractSearchTerms(query);
-        console.log(
-          `No products found for this query "${query}", retrying with keywords - [${keywords}]...`,
+      const runQuery = async (searchTerm) =>
+        callMagentoApi(
+          "POST",
+          "",
+          {
+            query: buildProductSearchQuery(!!category_id),
+            variables: buildVariables(searchTerm),
+          },
+          store_code,
+          true,
         );
 
-        for (let q of keywords) {
-          const gQuery = {
-            query: productSearchByQuery,
-            variables: {
-              search: q,
-              sortCode: sortOrder.code,
-              sortDir: sortOrder.direction,
-              pageSize: page_size,
-              currentPage: current_page,
-              priceMin: min_price || "0",
-              priceMax: max_price || "100000",
-            },
-          };
+      // Primary search attempt.
+      let searchResponse = await runQuery(query);
+      let items = searchResponse?.data?.products?.items || [];
 
-          const searchResponse = await await callMagentoApi(
-            "POST",
-            "",
-            gQuery,
-            store_code,
-            true,
-          );
+      // Apply in_stock_only post-query (version-agnostic — works on all Magento 2.x).
+      if (in_stock_only && items.length > 0) {
+        items = items.filter((p) => p.stock_status === "IN_STOCK");
+      }
 
-          if (
-            searchResponse?.data?.products?.items &&
-            searchResponse?.data?.products?.items?.length > 0
-          ) {
-            const formattedProducts = formatProducts(
-              searchResponse?.data?.products?.items,
-              full_details,
-            );
+      // Keyword-extraction fallback when the primary query returned nothing.
+      if (items.length === 0) {
+        const keywords = await extractSearchTerms(query);
 
-            result.products = formattedProducts;
+        for (const kw of keywords) {
+          const kwResponse = await runQuery(kw);
+          let kwItems = kwResponse?.data?.products?.items || [];
+          if (in_stock_only && kwItems.length > 0) {
+            kwItems = kwItems.filter((p) => p.stock_status === "IN_STOCK");
+          }
+          if (kwItems.length > 0) {
+            searchResponse = kwResponse;
+            items = kwItems;
             break;
           }
         }
       }
+
+      const formattedProducts = formatProducts(items, full_details);
+
+      // Pull pagination metadata from the (possibly keyword-fallback) response.
+      const productsData = searchResponse?.data?.products || {};
+      const totalCount = productsData.total_count ?? 0;
+      const pageInfo = productsData.page_info ?? null;
+
+      // Distil aggregations into a clean structure: remove price/category_uid buckets
+      // (already exposed as params) and drop options with zero products.
+      const rawAggregations = productsData.aggregations || [];
+      const aggregations = rawAggregations
+        .filter((a) => !["price", "category_uid"].includes(a.attribute_code))
+        .map((a) => ({
+          attribute: a.attribute_code,
+          label: a.label,
+          options: (a.options || [])
+            .filter((o) => o.count > 0)
+            .map((o) => ({ label: o.label, value: o.value, count: o.count })),
+        }))
+        .filter((a) => a.options.length > 0);
+
+      const result = {
+        total_count: totalCount,
+        page_info: pageInfo,
+        products: formattedProducts,
+        ...(aggregations.length > 0 && { aggregations }),
+      };
 
       try {
         await setCache(cacheKey, result);
