@@ -9,6 +9,7 @@ const nodemailer = require("nodemailer");
 const {
   buildProductSearchQuery,
   productSearchBySKU,
+  productSearchByQuery,
 } = require("./graphql_queries");
 const {
   MCP_NAME,
