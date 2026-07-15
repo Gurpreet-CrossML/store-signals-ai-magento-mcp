@@ -7,8 +7,6 @@ const { productSearchByQuery } = require("./graphql_queries");
 // Load environment variables from .env file
 dotenv.config();
 
-const MAGENTO_BASE_URL = process.env.MAGENTO_BASE_URL;
-const MAGENTO_API_TOKEN = process.env.MAGENTO_API_TOKEN;
 const SORT_CODE = process.env.SORT_CODE;
 const SORT_DIR = process.env.SORT_DIR;
 const WEBSITE_ID = parseInt(process.env.WEBSITE_ID || 4);
@@ -22,8 +20,6 @@ const MCP_NAME = process.env.MCP_NAME;
 const MCP_VERSION = process.env.MCP_VERSION;
 
 const allEnvironmentVariables = {
-  MAGENTO_BASE_URL,
-  MAGENTO_API_TOKEN,
   SORT_CODE,
   SORT_DIR,
   WEBSITE_ID,
@@ -84,6 +80,8 @@ const SORT_MAPPING = {
 
 // Utility function to call Magento API
 const callMagentoApi = async (
+  base_url,
+  access_token,
   method = "GET",
   endpoint = "",
   data = null,
@@ -92,14 +90,14 @@ const callMagentoApi = async (
 ) => {
   try {
     let url = isGraphQL
-      ? `${MAGENTO_BASE_URL}/graphql`
-      : `${MAGENTO_BASE_URL}/rest/V1${endpoint}`;
+      ? `${base_url}/graphql`
+      : `${base_url}/rest/V1${endpoint}`;
 
     console.log(`Calling Magento API: ${method} - ${url}`);
 
     const headers = {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${MAGENTO_API_TOKEN}`,
+      Authorization: `Bearer ${access_token}`,
     };
 
     if (store_code) {
@@ -131,7 +129,7 @@ const callMagentoApi = async (
 };
 
 // Utility function to call the backend API
-const callBackendAPI = async (method, endpoint, data = {}) => {
+const callBackendAPI = async (widget_key, method, endpoint, data = {}) => {
   try {
     const url = `${BACKEND_API_URL}${endpoint}`;
 
@@ -140,6 +138,9 @@ const callBackendAPI = async (method, endpoint, data = {}) => {
     const config = {
       method,
       url,
+      headers: {
+        "X-Widget-Key": widget_key,
+      },
       timeout: 15000,
       data: data,
     };
@@ -163,7 +164,12 @@ const getCurrencySymbol = (code) => {
 };
 
 // Save viewed products to backend for analytics
-const logProductViewEvents = async (products, session_id, store_code) => {
+const logProductViewEvents = async (
+  widget_key,
+  products,
+  session_id,
+  store_code,
+) => {
   if (!Array.isArray(products) || !session_id || !store_code) {
     return;
   }
@@ -175,7 +181,7 @@ const logProductViewEvents = async (products, session_id, store_code) => {
         .pop();
       if (!productId) return Promise.resolve();
 
-      return callBackendAPI("POST", "/chat/bot-events/", {
+      return callBackendAPI(widget_key, "POST", "/chat/bot-events/", {
         thread_id: session_id,
         event_type: "view_product",
         store_code,
@@ -198,7 +204,7 @@ const htmlToText = (html) => {
 };
 
 // Utility function to format products data received from Magento API
-const formatProducts = (products, full_details = false) => {
+const formatProducts = (base_url, products, full_details = false) => {
   try {
     if (!products || products?.length === 0) return [];
 
@@ -238,9 +244,9 @@ const formatProducts = (products, full_details = false) => {
         image:
           product?.media_gallery_entries &&
           product?.media_gallery_entries?.length > 0
-            ? `${MAGENTO_BASE_URL}/media/catalog/product/${product?.media_gallery_entries[0].file}`
-            : `${MAGENTO_BASE_URL}/media/catalog/product/placeholder/websites/4/mb-logo.webp`,
-        product_url: `${MAGENTO_BASE_URL}/${product.url_path || product.url_key}${product.url_suffix}`,
+            ? `${base_url}/media/catalog/product/${product?.media_gallery_entries[0].file}`
+            : `${base_url}/media/catalog/product/placeholder/websites/4/mb-logo.webp`,
+        product_url: `${base_url}/${product.url_path || product.url_key}${product.url_suffix}`,
         variants: product.variants?.map((variant) => {
           const { product: p, attributes } = variant;
           const options = [];
@@ -316,8 +322,8 @@ const formatStoreMetaInfo = (metadata) => {
 };
 
 // Fetch store metadata like product tags, types, collections, and categories
-const storeMetadata = async () => {
-  const cacheKey = "store_metadata";
+const storeMetadata = async (base_url, access_token, store_code) => {
+  const cacheKey = `store_metadata:store:${store_code}`;
 
   try {
     const cachedMetadata = await getCache(cacheKey);
@@ -326,6 +332,8 @@ const storeMetadata = async () => {
     }
 
     const result = await callMagentoApi(
+      base_url,
+      access_token,
       "GET",
       "/categories?searchCriteria[currentPage]=1&searchCriteria[pageSize]=100",
     );
@@ -354,13 +362,13 @@ const storeMetadata = async () => {
 };
 
 // Utility function to extract relevant search terms from a user query using OpenAI's language model. It uses the store metadata to generate more accurate and relevant search terms that can be used to query the product catalog.
-const extractSearchTerms = async (query) => {
+const extractSearchTerms = async (base_url, access_token, query) => {
   if (!query || typeof query !== "string") {
     return [];
   }
 
   try {
-    const metadata = await storeMetadata();
+    const metadata = await storeMetadata(base_url, access_token);
 
     const prompt = `You are an eCommerce search query generator.
 
@@ -483,7 +491,7 @@ const getTrackingUrl = (order) => {
 };
 
 // Utility function to format order data
-const formatOrder = (order) => {
+const formatOrder = (base_url, order) => {
   // Format items
   const items = order.items.map((item) => ({
     item_id: item.item_id,
@@ -504,7 +512,7 @@ const formatOrder = (order) => {
     discount: `€${order.discount_amount}`,
     tax: `€${order.shipping_incl_tax}`,
     total: `€${order.grand_total}`,
-    order_url: `${MAGENTO_BASE_URL}sales/order/view/order_id/${order.entity_id}/`,
+    order_url: `${base_url}sales/order/view/order_id/${order.entity_id}/`,
     tracking_url: getTrackingUrl(order),
     items: items,
   };
@@ -622,6 +630,9 @@ const formatDiscounts = (rules) => {
 // Returns an array of results — one entry per product name — each containing either the matched
 // product(s) or an indicator that no match was found.
 const searchProductsByNames = async (
+  base_url,
+  access_token,
+  widget_key,
   product_names,
   session_id,
   store_code,
@@ -631,11 +642,16 @@ const searchProductsByNames = async (
 
   for (const name of product_names) {
     try {
-      const cacheKey = `search:${name}:${full_details ? "full" : "brief"}`;
+      const cacheKey = `search:${name}:${full_details ? "full" : "brief"}:store:${store_code}`;
       const cached = await getCache(cacheKey);
 
       if (cached) {
-        logProductViewEvents(cached.products, session_id, store_code);
+        logProductViewEvents(
+          widget_key,
+          cached.products,
+          session_id,
+          store_code,
+        );
         results.push({
           product_name: name,
           product_detail:
@@ -664,6 +680,8 @@ const searchProductsByNames = async (
       // NoSuchEntityException from the SagePaySuite plugin when the code is
       // not a recognised Magento store view.
       const searchResponse = await callMagentoApi(
+        base_url,
+        access_token,
         "POST",
         "",
         graphqlQuery,
@@ -675,6 +693,7 @@ const searchProductsByNames = async (
 
       if (searchResponse?.data?.products?.items?.length > 0) {
         formattedProducts = formatProducts(
+          base_url,
           searchResponse.data.products.items,
           full_details,
         );
@@ -697,7 +716,12 @@ const searchProductsByNames = async (
         );
       }
 
-      logProductViewEvents(formattedProducts, session_id, store_code);
+      logProductViewEvents(
+        widget_key,
+        formattedProducts,
+        session_id,
+        store_code,
+      );
       results.push(entry);
     } catch (error) {
       console.error(
